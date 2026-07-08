@@ -206,7 +206,7 @@ def compute_metrics(
     unknown_recall = float(np.mean(~pk[~tk])) if n_unknown else float("nan")
     tp = int(np.sum(~pk & ~tk)); fp = int(np.sum(~pk & tk))
     precision = tp / (tp + fp) if (tp + fp) else 0.0
-    rec = tp / (tp + n_unknown) if n_unknown else 0.0
+    rec = tp / n_unknown if n_unknown else 0.0   # = unknown_recall (fn = n_unknown - tp)
     f1 = 2 * precision * rec / (precision + rec) if (precision + rec) else 0.0
 
     # per-group accuracy
