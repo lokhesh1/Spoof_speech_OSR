@@ -15,6 +15,7 @@ Output layout::
 Each ``.npz`` contains:
 
     features   : (D,) for mean/max/mean_std pooling, or (T, D) for "none"
+                 (float32, or float16 when --fp16 is set)
     path       : relative clip path (str)
     model_name : TTS model directory name (str)
     language   : language code (str)
@@ -41,11 +42,12 @@ Extract layers 1, 3, and 6 with full sequence output in one pass::
 from __future__ import annotations
 
 import argparse
+import csv
 import logging
 import sys
 import time
 from pathlib import Path
-from typing import List, Optional, Sequence, Tuple
+from typing import List, Optional, Sequence, Set, Tuple
 
 import numpy as np
 
@@ -117,6 +119,29 @@ def scan_mlaad(root: Path) -> List[Tuple[str, str, str]]:
 
 
 # --------------------------------------------------------------------------- #
+# Protocol filter
+# --------------------------------------------------------------------------- #
+def protocol_rels(protocol_dir: Path) -> Set[str]:
+    """Union of clip rel-paths listed in ``{train,dev,eval}.csv``.
+
+    Reads the ``path`` column, normalizes ``./fake/...`` -> ``fake/...`` (to
+    match :func:`scan_mlaad`), and dedups across splits (so eval.csv's repeated
+    rows collapse to one). Only these clips are extracted in protocol mode.
+    """
+    rels: Set[str] = set()
+    for split in ("train", "dev", "eval"):
+        csv_path = protocol_dir / f"{split}.csv"
+        if not csv_path.is_file():
+            logger.warning("Protocol CSV missing, skipping: %s", csv_path)
+            continue
+        with open(csv_path, newline="", encoding="utf-8") as fh:
+            for row in csv.DictReader(fh):
+                v = row["path"]
+                rels.add(v.lstrip("./") if v.startswith("./") else v)
+    return rels
+
+
+# --------------------------------------------------------------------------- #
 # Pooling
 # --------------------------------------------------------------------------- #
 def pool(features: np.ndarray, method: str) -> np.ndarray:
@@ -152,14 +177,26 @@ def extract(
     limit: Optional[int],
     overwrite: bool,
     log_every: int,
+    fp16: bool = False,
+    protocol_dir: Optional[Path] = None,
 ) -> None:
     recs = scan_mlaad(root)
+    if protocol_dir is not None:
+        allowed = protocol_rels(protocol_dir)
+        before = len(recs)
+        recs = [r for r in recs if r[0] in allowed]
+        found = {r[0] for r in recs}
+        logger.info(
+            "Protocol filter: %d/%d protocol clips found on disk "
+            "(%d listed but missing); skipping %d non-protocol clips.",
+            len(recs), len(allowed), len(allowed - found), before - len(recs),
+        )
     if limit:
         recs = recs[:limit]
     n = len(recs)
     logger.info(
-        "MLAAD pool: %d clips | hf_id=%s | layers=%s | pooling=%s",
-        n, hf_id, layers, pooling,
+        "MLAAD pool: %d clips | hf_id=%s | layers=%s | pooling=%s | dtype=%s",
+        n, hf_id, layers, pooling, "float16" if fp16 else "float32",
     )
 
     model = load_model(hf_id, device=device)
@@ -201,6 +238,9 @@ def extract(
                     layer_feats[layer].numpy().astype(np.float32, copy=False),
                     pooling,
                 )
+                if fp16:
+                    # pool in fp32 (mean/std stay accurate), store in fp16
+                    feat = feat.astype(np.float16)
                 out_paths[layer].parent.mkdir(parents=True, exist_ok=True)
                 np.savez(
                     out_paths[layer],
@@ -274,6 +314,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
                    help="Process only the first N clips (smoke test).")
     p.add_argument("--overwrite", action="store_true",
                    help="Re-extract even if the .npz already exists.")
+    p.add_argument("--fp16", action="store_true",
+                   help="Store features as float16 (halves disk; forward stays fp32).")
+    p.add_argument("--protocol-dir", default=None,
+                   help="Restrict extraction to clips in <dir>/{train,dev,eval}.csv "
+                        "(e.g. mlaad4sourcetracing); omit to extract the whole tree.")
     p.add_argument("--log-every", type=int, default=500,
                    help="Progress log interval (clips).")
     p.add_argument("-v", "--verbose", action="store_true")
@@ -293,6 +338,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         limit=args.limit,
         overwrite=args.overwrite,
         log_every=args.log_every,
+        fp16=args.fp16,
+        protocol_dir=Path(args.protocol_dir) if args.protocol_dir else None,
     )
     return 0
 
