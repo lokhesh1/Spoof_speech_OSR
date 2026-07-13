@@ -168,7 +168,7 @@ def run(
     np.savez(
         art / "gauss_stats.npz",
         means=means, precision=precision, head=head_kind,
-        prototypes=(prototypes.numpy() if prototypes is not None
+        prototypes=(prototypes.cpu().numpy() if prototypes is not None
                     else np.zeros(0, dtype=np.float32)),
     )
     logger.info("gauss_stats.npz: means %s, precision %s",

@@ -83,6 +83,35 @@ def oscr(s: np.ndarray, correct: np.ndarray, known: np.ndarray) -> Dict[str, flo
             "ccr_at_fpr10": float(np.interp(0.10, fpr, ccr))}
 
 
+def detection_pointwise(s: np.ndarray, known: np.ndarray) -> Dict[str, float]:
+    """Thresholded detection metrics at the gate boundary ``s >= 0``.
+
+    The detected (positive) class is **unknown** -- the thing the gate rejects.
+    Reports precision/recall/F1 for unknown, plus plain and balanced accuracy
+    (the latter robust to the known/unknown imbalance).
+    """
+    accepted = s >= 0.0                      # predicted known
+    rejected = ~accepted                      # predicted unknown
+    unk = ~known
+    nk, nu = int(known.sum()), int(unk.sum())
+    if nk == 0 or nu == 0:
+        return {"f1_unknown": float("nan"), "precision_unknown": float("nan"),
+                "recall_unknown": float("nan"), "accuracy": float("nan"),
+                "balanced_accuracy": float("nan"), "threshold": 0.0}
+    tp = int((rejected & unk).sum())          # unknown correctly rejected
+    fp = int((rejected & known).sum())        # known wrongly rejected
+    prec = tp / (tp + fp) if (tp + fp) else float("nan")
+    rec = tp / nu                             # == unknown_reject_rate
+    f1 = (2 * prec * rec / (prec + rec)
+          if prec == prec and (prec + rec) else float("nan"))
+    acc = float((accepted & known).sum() + tp) / (nk + nu)
+    known_acc = float((accepted & known).sum()) / nk
+    bal_acc = 0.5 * (known_acc + rec)
+    return {"f1_unknown": float(f1), "precision_unknown": float(prec),
+            "recall_unknown": float(rec), "accuracy": acc,
+            "balanced_accuracy": bal_acc, "threshold": 0.0}
+
+
 def closed_set(pred: np.ndarray, labels: np.ndarray, s: np.ndarray,
                known: np.ndarray) -> Dict[str, float]:
     """Top-1 on eval-known: unconditioned and conditioned on gate acceptance."""
@@ -146,6 +175,9 @@ def run(
     keep = known | ~is_overlap          # keep all knowns + non-overlap unknowns
     results["detection_41"] = detection(s[keep], known[keep])
 
+    # Thresholded detection (F1/accuracy at the gate boundary s>=0)
+    results["detection_pointwise"] = detection_pointwise(s, known)
+
     # Joint + closed-set
     correct = pred == labels
     results["oscr"] = oscr(s, correct, known)
@@ -195,10 +227,15 @@ def _save_and_print(art: Path, results: Dict) -> None:
 
     d43, d41 = results["detection_43"], results["detection_41"]
     cs, mem = results["closed_set"], results["memorization"]
+    dp = results["detection_pointwise"]
     logger.info("=== %s layer %d (n=%d) ===", results["head"],
                 results["layer"], results["n_eval"])
     logger.info("Detection  AUROC 43-cat %.4f | 41-cat %.4f | AUPR(unk) %.4f",
                 d43["auroc"], d41["auroc"], d43["aupr_unknown"])
+    logger.info("@s>=0      F1(unk) %.4f | P(unk) %.4f | R(unk) %.4f | "
+                "acc %.4f | bal-acc %.4f", dp["f1_unknown"],
+                dp["precision_unknown"], dp["recall_unknown"],
+                dp["accuracy"], dp["balanced_accuracy"])
     logger.info("OSCR       AU %.4f | CCR@FPR0.1 %.4f",
                 results["oscr"]["au_oscr"], results["oscr"]["ccr_at_fpr10"])
     logger.info("Closed-set top1 %.4f | top1|accepted %.4f | accept %.4f | "
