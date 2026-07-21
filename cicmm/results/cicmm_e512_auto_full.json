@@ -1,0 +1,93 @@
+{
+  "gmm_covariance": "full",
+  "gmm_components": 5,
+  "best_coverage": 0.02,
+  "layer": 5,
+  "n_eval": 33791,
+  "detection": {
+    "auroc": 0.9155620284611943,
+    "eer": 0.1272204385136454,
+    "n_known": 13482,
+    "n_unknown": 20309
+  },
+  "classification": {
+    "macro_f1": 0.7451840583886135,
+    "f1_unknown": 0.6667097942812783,
+    "known_top1": 0.9691440439103991,
+    "known_accept_rate": 0.9776739356178609,
+    "unknown_reject_rate": 0.5074597469102369
+  },
+  "per_class_f1": {
+    "Mars5": 1.0,
+    "MeloTTS": 1.0,
+    "Metavoice-1B": 1.0,
+    "facebook/mms-tts-deu": 1.0,
+    "griffin_lim": 0.991,
+    "suno/bark": 0.6706,
+    "suno/bark-small": 0.8487,
+    "tts_models/de/css10/vits-neon": 0.9983,
+    "tts_models/de/thorsten/tacotron2-DDC": 1.0,
+    "tts_models/en/ljspeech/fast_pitch": 0.0,
+    "tts_models/en/ljspeech/speedy-speech": 0.0,
+    "tts_models/en/ljspeech/tacotron2-DCA": 0.9983,
+    "tts_models/en/ljspeech/tacotron2-DDC": 0.9838,
+    "tts_models/en/ljspeech/tacotron2-DDC_ph": 0.9949,
+    "tts_models/en/ljspeech/vits--neon": 0.9889,
+    "tts_models/fr/css10/vits": 1.0,
+    "tts_models/fr/mai/tacotron2-DDC": 1.0,
+    "tts_models/it/mai_female/glow-tts": 0.0,
+    "tts_models/it/mai_female/vits": 1.0,
+    "tts_models/it/mai_male/vits": 1.0,
+    "tts_models/lt/cv/vits": 1.0,
+    "tts_models/multilingual/multi-dataset/xtts_v1.1": 0.9817,
+    "tts_models/multilingual/multi-dataset/xtts_v2": 0.9822,
+    "vixTTS": 0.9831
+  },
+  "quadrants": {
+    "lang_seen__model_seen": {
+      "auroc": NaN,
+      "eer": NaN,
+      "n_known": 8591,
+      "n_unknown": 0,
+      "macro_f1": 0.9235438663394421,
+      "f1_unknown": 0.0,
+      "known_top1": 0.976836223955302,
+      "known_accept_rate": 0.9902223256896753,
+      "unknown_reject_rate": 0.0
+    },
+    "lang_seen__model_not_seen": {
+      "auroc": 0.968419756785258,
+      "eer": 0.07949271675820466,
+      "n_known": 91,
+      "n_unknown": 7409,
+      "macro_f1": 0.0767473773874852,
+      "f1_unknown": 0.6864587025877349,
+      "known_top1": 0.978021978021978,
+      "known_accept_rate": 0.978021978021978,
+      "unknown_reject_rate": 0.5227426103387771
+    },
+    "lang_not_seen__model_seen": {
+      "auroc": NaN,
+      "eer": NaN,
+      "n_known": 4800,
+      "n_unknown": 0,
+      "macro_f1": 0.7825207262388097,
+      "f1_unknown": 0.0,
+      "known_top1": 0.9552083333333333,
+      "known_accept_rate": 0.9552083333333333,
+      "unknown_reject_rate": 0.0
+    },
+    "lang_not_seen__model_not_seen": {
+      "auroc": NaN,
+      "eer": NaN,
+      "n_known": 0,
+      "n_unknown": 12900,
+      "macro_f1": 0.09507060466559768,
+      "f1_unknown": 0.6654942326591837,
+      "known_top1": 0.0,
+      "known_accept_rate": 0.0,
+      "unknown_reject_rate": 0.49868217054263564
+    }
+  },
+  "logit_top1_known": 0.9900608218365228
+}
