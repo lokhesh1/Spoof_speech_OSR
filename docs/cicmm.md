@@ -19,7 +19,7 @@ Different combination where experimented here: Two prototype-update strategies (
 
 **Losses and GMM fitting.** The training loss combines cross-entropy, a supervised contrastive term (SupCon, temperature 0.05) on real embeddings, and the ICMM term, which penalizes synthetic points - interpolated from same batch embedding pairs under a curriculum-controlled blend ratio - for lying close to any class centroid, weighted by the pair weight matrix. 
 
-1. Cross-entropy ($ \mathcal{L}_{CE} $)
+1. Cross-entropy 
 
 Standard softmax classification loss on the 24-way logits from the real batch:
 
