@@ -135,7 +135,7 @@ def fit_gate(art: Path) -> Dict:
               "head": stats["head"], "r0": r0}
     joblib.dump(bundle, art / "gate.pkl")
 
-    train_auroc = _auroc(clf.decision_function(Xz), y)
+    train_auroc = _auroc(clf.predict_proba(Xz)[:, 1], y)
     logger.info("gate fit on dev (%d known / %d unknown), %d descriptors; "
                 "dev-resub AUROC %.4f -> %s",
                 len(Xk), len(Xu), len(names), train_auroc, art / "gate.pkl")
@@ -150,14 +150,15 @@ def load_gate(art: Path) -> Dict:
 def score_split(art: Path, split: str, bundle: Optional[Dict] = None):
     """Return ``(s, labels, is_known)`` for a split under the fitted gate.
 
-    ``s >= 0`` -> known, ``s < 0`` -> unknown.
+    ``s`` is ``P(known)`` (sigmoid of the logistic gate's decision function).
+    ``s >= 0.5`` -> known, ``s < 0.5`` -> unknown.
     """
     bundle = bundle or load_gate(art)
     stats = load_stats(art)
     cache = load_cache(art, split)
     X, _ = build_descriptors(cache, stats, bundle["head"] == "busemann")
     Xz = (X - bundle["zmean"]) / bundle["zstd"]
-    s = bundle["clf"].decision_function(Xz)
+    s = bundle["clf"].predict_proba(Xz)[:, 1]
     return s, cache["labels"], cache["is_known"].astype(bool)
 
 

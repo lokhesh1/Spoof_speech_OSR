@@ -32,7 +32,7 @@ import numpy as np
 from common import add_repo_to_path, configure_logging
 from gate import (_auroc, build_descriptors, load_cache, load_gate, load_stats,
                   score_split)
-from train import PROTO_DIR_DEFAULT
+from train import N_CLASSES, PROTO_DIR_DEFAULT
 
 logger = logging.getLogger("ser.osr_gate.eval")
 
@@ -49,8 +49,27 @@ SUBSPLITS = ("lang_seen__model_seen", "lang_seen__model_not_seen",
 # --------------------------------------------------------------------------- #
 # Metrics
 # --------------------------------------------------------------------------- #
+def eer(s: np.ndarray, known: np.ndarray) -> Dict[str, float]:
+    """Equal error rate: the operating point where FAR == FRR.
+
+    FAR = unknowns accepted, FRR = knowns rejected, sweeping the threshold on
+    ``s`` (known-high). Threshold-free -- independent of the gate's ``s >= 0.5``
+    boundary -- so it says how separable the two score distributions are.
+    """
+    if len(np.unique(known)) != 2:
+        return {"eer": float("nan"), "eer_threshold": float("nan")}
+    from sklearn.metrics import roc_curve
+
+    far, tpr, thr = roc_curve(known, s)   # far = unknowns accepted at each thr
+    frr = 1.0 - tpr                        # knowns rejected
+    i = int(np.nanargmin(np.abs(frr - far)))
+    return {"eer": float((far[i] + frr[i]) / 2.0), "eer_threshold": float(thr[i])}
+
+
 def detection(s: np.ndarray, known: np.ndarray) -> Dict[str, float]:
-    """AUROC + AUPR (known-positive and unknown-positive) from a known-high score."""
+    """AUROC + AUPR + EER (threshold-free) plus pointwise F1/accuracy at
+    ``s >= 0.5`` (threshold-dependent), from a known-high score.
+    """
     from sklearn.metrics import average_precision_score
     out = {"auroc": _auroc(s, known), "n_known": int(known.sum()),
            "n_unknown": int((~known).sum())}
@@ -59,6 +78,8 @@ def detection(s: np.ndarray, known: np.ndarray) -> Dict[str, float]:
         out["aupr_unknown"] = float(average_precision_score(~known, -s))
     else:
         out["aupr_known"] = out["aupr_unknown"] = float("nan")
+    out.update(eer(s, known))
+    out.update(detection_pointwise(s, known))
     return out
 
 
@@ -83,33 +104,105 @@ def oscr(s: np.ndarray, correct: np.ndarray, known: np.ndarray) -> Dict[str, flo
             "ccr_at_fpr10": float(np.interp(0.10, fpr, ccr))}
 
 
-def detection_pointwise(s: np.ndarray, known: np.ndarray) -> Dict[str, float]:
-    """Thresholded detection metrics at the gate boundary ``s >= 0``.
+def _prf(pred_pos: np.ndarray, true_pos: np.ndarray) -> Dict[str, float]:
+    """Precision / recall / F1 for one binary class given boolean masks."""
+    tp = int((pred_pos & true_pos).sum())
+    fp = int((pred_pos & ~true_pos).sum())
+    fn = int((~pred_pos & true_pos).sum())
+    prec = tp / (tp + fp) if (tp + fp) else float("nan")
+    rec = tp / (tp + fn) if (tp + fn) else float("nan")
+    f1 = (2 * prec * rec / (prec + rec)
+          if prec == prec and rec == rec and (prec + rec) else float("nan"))
+    return {"precision": prec, "recall": rec, "f1": f1}
 
-    The detected (positive) class is **unknown** -- the thing the gate rejects.
-    Reports precision/recall/F1 for unknown, plus plain and balanced accuracy
-    (the latter robust to the known/unknown imbalance).
+
+def detection_pointwise(s: np.ndarray, known: np.ndarray) -> Dict[str, float]:
+    """Thresholded known-vs-unknown metrics at the gate boundary ``s >= 0.5``.
+
+    Reports precision/recall/F1 for **both** classes plus their macro average
+    (the headline -- unweighted, so the unknown majority cannot flatter it),
+    alongside plain and balanced accuracy.
     """
-    accepted = s >= 0.0                      # predicted known
+    accepted = s >= 0.5                      # predicted known
     rejected = ~accepted                      # predicted unknown
     unk = ~known
     nk, nu = int(known.sum()), int(unk.sum())
     if nk == 0 or nu == 0:
-        return {"f1_unknown": float("nan"), "precision_unknown": float("nan"),
-                "recall_unknown": float("nan"), "accuracy": float("nan"),
-                "balanced_accuracy": float("nan"), "threshold": 0.0}
-    tp = int((rejected & unk).sum())          # unknown correctly rejected
-    fp = int((rejected & known).sum())        # known wrongly rejected
-    prec = tp / (tp + fp) if (tp + fp) else float("nan")
-    rec = tp / nu                             # == unknown_reject_rate
-    f1 = (2 * prec * rec / (prec + rec)
-          if prec == prec and (prec + rec) else float("nan"))
-    acc = float((accepted & known).sum() + tp) / (nk + nu)
-    known_acc = float((accepted & known).sum()) / nk
-    bal_acc = 0.5 * (known_acc + rec)
-    return {"f1_unknown": float(f1), "precision_unknown": float(prec),
-            "recall_unknown": float(rec), "accuracy": acc,
-            "balanced_accuracy": bal_acc, "threshold": 0.0}
+        nan = float("nan")
+        return {"f1_unknown": nan, "f1_known": nan, "macro_f1": nan,
+                "precision_unknown": nan, "recall_unknown": nan,
+                "precision_known": nan, "recall_known": nan,
+                "accuracy": nan, "balanced_accuracy": nan, "threshold": 0.5}
+    u = _prf(rejected, unk)                   # unknown is the positive class
+    k = _prf(accepted, known)                 # known is the positive class
+    acc = float(int((accepted & known).sum()) + int((rejected & unk).sum())) / (nk + nu)
+    return {"f1_unknown": u["f1"], "f1_known": k["f1"],
+            "macro_f1": float(np.mean([u["f1"], k["f1"]])),
+            "precision_unknown": u["precision"], "recall_unknown": u["recall"],
+            "precision_known": k["precision"], "recall_known": k["recall"],
+            "accuracy": acc,
+            "balanced_accuracy": 0.5 * (k["recall"] + u["recall"]),
+            "threshold": 0.5}
+
+
+def unknown_model_f1(s: np.ndarray, known: np.ndarray,
+                     model_names: np.ndarray) -> Dict[str, float]:
+    """Per-unknown-model F1, macro-averaged across the individual TTS models.
+
+    ``detection_pointwise``'s ``f1_unknown`` pools every unknown clip into one
+    class, so a handful of easy (high-volume) unknown models can flatter it.
+    This instead scores each unseen model against the pooled knowns
+    separately -- model ``m``'s clips are the positive class, all known clips
+    are the negative class, and every *other* unknown model's clips are
+    excluded from that pairing -- then macro-averages F1 across models so
+    each one counts equally regardless of its clip count.
+    """
+    accepted = s >= 0.5
+    rejected = ~accepted
+    unk = ~known
+    models = sorted(set(model_names[unk]) - {""})
+    per_model: Dict[str, Dict[str, float]] = {}
+    f1s: List[float] = []
+    for m in models:
+        pos = unk & (model_names == m)
+        mask = known | pos
+        prf = _prf(rejected[mask], pos[mask])
+        per_model[m] = prf
+        if prf["f1"] == prf["f1"]:
+            f1s.append(prf["f1"])
+    return {"macro_f1_unknown": float(np.mean(f1s)) if f1s else float("nan"),
+            "n_unknown_models": len(models),
+            "per_model_f1": {m: v["f1"] for m, v in per_model.items()}}
+
+
+def balanced_open_set_acc(pred: np.ndarray, labels: np.ndarray, s: np.ndarray,
+                          known: np.ndarray, n_classes: int = N_CLASSES) -> Dict[str, float]:
+    """Open-set accuracy weighing knowns and unknowns 50/50.
+
+    A known clip counts as correct only if it is **accepted AND attributed to
+    its own class** (so this scores the gate and Stage 2 jointly); an unknown
+    counts as correct if it is rejected. Per-class recall is macro-averaged over
+    the known classes, then averaged 50/50 with the unknown recall -- neither
+    the 24-way imbalance nor the known/unknown imbalance can skew it.
+    """
+    accepted = s >= 0.5
+    unk = ~known
+    per_class: Dict[str, float] = {}
+    recalls: List[float] = []
+    for c in range(n_classes):
+        m = known & (labels == c)
+        if not m.sum():
+            continue
+        r = float((accepted & (pred == c))[m].mean())
+        per_class[str(c)] = r
+        recalls.append(r)
+    known_macro = float(np.mean(recalls)) if recalls else float("nan")
+    unk_recall = float((~accepted)[unk].mean()) if unk.sum() else float("nan")
+    return {"balanced_open_set_acc": 0.5 * (known_macro + unk_recall),
+            "known_macro_recall": known_macro,
+            "unknown_recall": unk_recall,
+            "n_classes_seen": len(recalls),
+            "per_class_recall": per_class}
 
 
 def closed_set(pred: np.ndarray, labels: np.ndarray, s: np.ndarray,
@@ -120,7 +213,7 @@ def closed_set(pred: np.ndarray, labels: np.ndarray, s: np.ndarray,
         return {"top1": float("nan"), "top1_accepted": float("nan"),
                 "accept_rate": float("nan")}
     correct = pred == labels
-    accepted = s >= 0.0
+    accepted = s >= 0.5
     top1 = float(correct[k].mean())
     ka = k & accepted
     top1_acc = float(correct[ka].mean()) if ka.sum() else float("nan")
@@ -171,17 +264,17 @@ def run(
     # Detection: 43-cat (all) and 41-cat (drop dev-overlap unknowns)
     results["detection_43"] = detection(s, known)
     rel2model = _eval_model_names(protocol_dir, feat_root, layer)
-    is_overlap = np.array([rel2model.get(r, "") in OVERLAP_MODELS for r in rels])
+    model_names = np.array([rel2model.get(r, "") for r in rels])
+    is_overlap = np.isin(model_names, list(OVERLAP_MODELS))
     keep = known | ~is_overlap          # keep all knowns + non-overlap unknowns
     results["detection_41"] = detection(s[keep], known[keep])
-
-    # Thresholded detection (F1/accuracy at the gate boundary s>=0)
-    results["detection_pointwise"] = detection_pointwise(s, known)
+    results["unknown_model_f1"] = unknown_model_f1(s, known, model_names)
 
     # Joint + closed-set
     correct = pred == labels
     results["oscr"] = oscr(s, correct, known)
     results["closed_set"] = closed_set(pred, labels, s, known)
+    results["open_set_acc"] = balanced_open_set_acc(pred, labels, s, known)
 
     # Memorization: dev-unknown vs eval-unknown separability
     s_dk, _, k_dk = score_split(art, "dev_known", bundle)
@@ -227,15 +320,23 @@ def _save_and_print(art: Path, results: Dict) -> None:
 
     d43, d41 = results["detection_43"], results["detection_41"]
     cs, mem = results["closed_set"], results["memorization"]
-    dp = results["detection_pointwise"]
+    dp = d43
     logger.info("=== %s layer %d (n=%d) ===", results["head"],
                 results["layer"], results["n_eval"])
+    osa = results["open_set_acc"]
     logger.info("Detection  AUROC 43-cat %.4f | 41-cat %.4f | AUPR(unk) %.4f",
                 d43["auroc"], d41["auroc"], d43["aupr_unknown"])
-    logger.info("@s>=0      F1(unk) %.4f | P(unk) %.4f | R(unk) %.4f | "
-                "acc %.4f | bal-acc %.4f", dp["f1_unknown"],
-                dp["precision_unknown"], dp["recall_unknown"],
-                dp["accuracy"], dp["balanced_accuracy"])
+    logger.info("           EER 43-cat %.4f | 41-cat %.4f",
+                d43["eer"], d41["eer"])
+    logger.info("@s>=0.5    macro-F1 %.4f (known %.4f, unk %.4f) | "
+                "acc %.4f | bal-acc %.4f", dp["macro_f1"], dp["f1_known"],
+                dp["f1_unknown"], dp["accuracy"], dp["balanced_accuracy"])
+    umf1 = results["unknown_model_f1"]
+    logger.info("Per-model  macro-F1(unknown) %.4f over %d unseen models",
+                umf1["macro_f1_unknown"], umf1["n_unknown_models"])
+    logger.info("Open-set   bal-OSA %.4f (known-macro %.4f, unk-recall %.4f)",
+                osa["balanced_open_set_acc"], osa["known_macro_recall"],
+                osa["unknown_recall"])
     logger.info("OSCR       AU %.4f | CCR@FPR0.1 %.4f",
                 results["oscr"]["au_oscr"], results["oscr"]["ccr_at_fpr10"])
     logger.info("Closed-set top1 %.4f | top1|accepted %.4f | accept %.4f | "

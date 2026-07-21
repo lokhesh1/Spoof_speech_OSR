@@ -48,7 +48,9 @@ def evaluate_split(
     cache_dir: Optional[Path],
     transform,
     limit: Optional[int],
-    log_every: int,
+    shuffle: bool = False,
+    seed: int = 0,
+    log_every: int = 1000,
 ) -> Optional[dict]:
     add_repo_to_path()
     from protocols_mlaad import load_split
@@ -61,6 +63,10 @@ def evaluate_split(
 
     clips = load_split(protocol_dir, split, subsplit=subsplit,
                        mlaad_root=mlaad_root, label_map=label_map)
+    if shuffle:
+        # the protocol is ordered (knowns first), so a head slice is single-group
+        idx = np.random.default_rng(seed).permutation(len(clips))
+        clips = [clips[i] for i in idx]
     if limit:
         clips = clips[:limit]
     if not clips:
@@ -68,6 +74,7 @@ def evaluate_split(
         return None
 
     yt_label, yt_known, yp_label, yp_known, yp_argmax = [], [], [], [], []
+    scores: List[float] = []
     rows: List[dict] = []
     t0 = time.time()
     for i, c in enumerate(clips):
@@ -76,7 +83,10 @@ def evaluate_split(
             logger.warning("Empty LFCC (skipped): %s", c.rel)
             continue
         C = score_vector(feat, gmms)
-        is_inlier = int(ocsvm.predict(scaler.transform(C[None, :]))[0]) == 1
+        Cs = scaler.transform(C[None, :])
+        is_inlier = int(ocsvm.predict(Cs)[0]) == 1
+        # signed distance to the OCSVM boundary: higher = more inlier = more known
+        df = float(ocsvm.decision_function(Cs)[0])
         argmax = int(np.argmax(C))
         pred_label = argmax if is_inlier else UNKNOWN_LABEL
 
@@ -85,6 +95,7 @@ def evaluate_split(
         yp_label.append(pred_label)
         yp_known.append(is_inlier)
         yp_argmax.append(argmax)
+        scores.append(df)
         rows.append({
             "rel": c.rel,
             "language": c.language,
@@ -96,6 +107,7 @@ def evaluate_split(
             "pred_is_known": int(is_inlier),
             "top_gmm": classes[argmax],
             "top_loglik": float(C[argmax]),
+            "ocsvm_score": df,
         })
 
         if (i + 1) % log_every == 0 or (i + 1) == len(clips):
@@ -103,7 +115,8 @@ def evaluate_split(
                         (i + 1) / (time.time() - t0))
 
     return {"metrics": compute_metrics(yt_label, yt_known, yp_label, yp_known,
-                                       yp_argmax),
+                                       yp_argmax, y_score_known=scores,
+                                       n_classes=len(classes)),
             "rows": rows}
 
 
@@ -129,6 +142,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--out-csv", default=None,
                    help="Write per-clip predictions to this CSV file.")
     p.add_argument("--limit", type=int, default=None)
+    p.add_argument("--shuffle", action="store_true",
+                   help="Shuffle before --limit; the protocol is ordered, so a "
+                        "plain head slice yields known-only clips.")
+    p.add_argument("--seed", type=int, default=0, help="Seed for --shuffle.")
     p.add_argument("--log-every", type=int, default=1000)
     p.add_argument("-v", "--verbose", action="store_true")
     return p
@@ -153,7 +170,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         protocol_dir=Path(args.protocol_dir), mlaad_root=Path(args.mlaad_root),
         split=args.split, art=art, cfg=cfg,
         cache_dir=Path(args.cache_dir) if args.cache_dir else None,
-        transform=transform, limit=args.limit, log_every=args.log_every,
+        transform=transform, limit=args.limit, shuffle=args.shuffle,
+        seed=args.seed, log_every=args.log_every,
     )
 
     targets: List[Optional[str]]

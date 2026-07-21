@@ -141,6 +141,97 @@ def score_vector(lfcc: np.ndarray, gmms: Sequence) -> np.ndarray:
                        count=len(gmms))
 
 
+def top2_log_ratio(C: np.ndarray) -> float:
+    """Log of the top-two likelihood ratio: ``top1 - top2`` (>= 0).
+
+    Preferred as a *ranking* score (EER, ROC): monotonically equivalent to
+    :func:`top2_likelihood_ratio` but cannot overflow to ``inf``.
+    ``inf`` when there is only one class.
+    """
+    if C.shape[0] < 2:
+        return float("inf")
+    top1, top2 = np.partition(C, -2)[-2:][::-1]   # two largest, descending
+    return float(top1 - top2)
+
+
+def top2_likelihood_ratio(C: np.ndarray) -> float:
+    """Likelihood ratio between the two best-scoring GMMs for one clip.
+
+    ``C`` is a K-dim vector of mean per-frame *log*-likelihoods (from
+    :func:`score_vector`). The ratio of the two largest likelihoods is
+    ``exp(top1 - top2)`` -- equivalently the ratio of the top-two softmax
+    probabilities, since the normaliser cancels. Length-invariant because the
+    log-liks are per-frame means. ``inf`` when there is only one class.
+    """
+    return float(np.exp(top2_log_ratio(C)))
+
+
+def _clean_gate_scores(y_true_known: Sequence[bool],
+                       y_score_known: Sequence[float],
+                       caller: str) -> Optional[tuple]:
+    """Validate a (label, score) pair for the threshold-free gate metrics.
+
+    Drops non-finite scores and returns ``None`` when the metric is undefined
+    (i.e. one of the two groups is absent).
+    """
+    y = np.asarray(y_true_known, dtype=bool)
+    s = np.asarray(y_score_known, dtype=np.float64)
+    finite = np.isfinite(s)
+    if not finite.all():
+        logger.warning("%s: %d non-finite scores dropped", caller, int((~finite).sum()))
+        y, s = y[finite], s[finite]
+    if not y.any() or y.all():
+        return None
+    return y, s
+
+
+def compute_eer(y_true_known: Sequence[bool],
+                y_score_known: Sequence[float]) -> tuple[float, float]:
+    """Equal error rate of the known/unknown gate, and the score at the EER.
+
+    ``y_score_known`` is a continuous score where *higher = more known* (e.g.
+    the top-2 log ratio, or ``OneClassSVM.decision_function``). Threshold-free:
+    it characterises the score's ranking, not any particular operating point.
+    With ``known`` as the positive class, ``fpr`` is the rate of unknown clips
+    wrongly accepted (FAR) and ``1 - tpr`` the rate of known clips wrongly
+    rejected (FRR); the EER is where the two cross.
+
+    Returns ``(nan, nan)`` unless both groups are present.
+    """
+    from sklearn.metrics import roc_curve
+
+    cleaned = _clean_gate_scores(y_true_known, y_score_known, "compute_eer")
+    if cleaned is None:
+        return float("nan"), float("nan")
+    y, s = cleaned
+
+    fpr, tpr, thr = roc_curve(y.astype(int), s, pos_label=1)
+    fnr = 1.0 - tpr
+    i = int(np.nanargmin(np.abs(fnr - fpr)))
+    return float((fpr[i] + fnr[i]) / 2.0), float(thr[i])
+
+
+def compute_auroc(y_true_known: Sequence[bool],
+                  y_score_known: Sequence[float]) -> float:
+    """Area under the ROC curve for the known/unknown gate (higher = better).
+
+    Same score convention and threshold-freedom as :func:`compute_eer`, and
+    read off the same ROC. Equals the probability that a randomly drawn known
+    clip outranks a randomly drawn unknown one: 1.0 is perfect separation, 0.5
+    is chance. Symmetric in the class convention -- scoring *unknown* as the
+    positive class with a negated score gives the identical value.
+
+    Returns ``nan`` unless both groups are present.
+    """
+    from sklearn.metrics import roc_auc_score
+
+    cleaned = _clean_gate_scores(y_true_known, y_score_known, "compute_auroc")
+    if cleaned is None:
+        return float("nan")
+    y, s = cleaned
+    return float(roc_auc_score(y.astype(int), s))
+
+
 # --------------------------------------------------------------------------- #
 # Artifact IO
 # --------------------------------------------------------------------------- #
@@ -174,6 +265,8 @@ def compute_metrics(
     y_pred_label: Sequence[int],
     y_pred_known: Sequence[bool],
     y_pred_argmax: Sequence[int],
+    y_score_known: Optional[Sequence[float]] = None,
+    n_classes: Optional[int] = None,
 ) -> Dict[str, float]:
     """Open-set source-tracing metrics.
 
@@ -190,6 +283,18 @@ def compute_metrics(
     * ``balanced_open_set_acc``  = mean(known open-set acc, unknown recall) --
       balanced accuracy of the full task (known must be gated-known AND correct
       class; unknown must be gated unknown).
+
+    Two macro-F1 numbers weight every class equally regardless of support:
+
+    * ``macro_f1_open``   -- over the K+1 classes (knowns + ``unknown``); the
+      full open-set task, gate included.
+    * ``macro_f1_closed`` -- over the known classes on known clips using the raw
+      ``argmax``; pure attribution, gate-free.
+
+    ``y_score_known`` (optional) is a continuous gate score, *higher = more
+    known*, used only for the threshold-free ``eer``/``eer_threshold``.
+    ``n_classes`` pins the macro-F1 label set to ``0..K-1`` instead of deriving
+    it from the classes observed in this split.
     """
     yt = np.asarray(y_true_label)
     tk = np.asarray(y_true_known, dtype=bool)
@@ -213,7 +318,36 @@ def compute_metrics(
     closed = float(np.mean(am[tk] == yt[tk])) if n_known else float("nan")   # gate-free
     acc_known_open = float(np.mean(yp[tk] == yt[tk])) if n_known else float("nan")
 
+    # macro-F1: every class counts equally, whatever its support
+    from sklearn.metrics import f1_score
+
+    if n_classes is not None:
+        known_labels = list(range(n_classes))
+    else:
+        seen = np.concatenate([yt, yp, am])
+        known_labels = sorted({int(v) for v in seen if v != UNKNOWN_LABEL})
+    macro_f1_open = float(f1_score(yt, yp, labels=known_labels + [UNKNOWN_LABEL],
+                                   average="macro", zero_division=0))
+    if n_known:
+        # restrict to classes actually present among the known ground truth
+        closed_labels = sorted({int(v) for v in yt[tk]})
+        macro_f1_closed = float(f1_score(yt[tk], am[tk], labels=closed_labels,
+                                         average="macro", zero_division=0))
+    else:
+        macro_f1_closed = float("nan")
+
+    if y_score_known is not None:
+        eer, eer_thr = compute_eer(tk, y_score_known)
+        auroc = compute_auroc(tk, y_score_known)
+    else:
+        eer = eer_thr = auroc = float("nan")
+
     return {
+        "eer": eer,
+        "eer_threshold": eer_thr,
+        "auroc": auroc,
+        "macro_f1_open": macro_f1_open,
+        "macro_f1_closed": macro_f1_closed,
         "n": n,
         "n_known": n_known,
         "n_unknown": n_unknown,
@@ -231,10 +365,16 @@ def compute_metrics(
 
 
 def format_metrics(tag: str, m: Dict[str, float]) -> str:
+    eer = ("n/a" if np.isnan(m["eer"])
+           else f"{m['eer']:.4f}  (@ score {m['eer_threshold']:.3f})")
+    auroc = "n/a" if np.isnan(m["auroc"]) else f"{m['auroc']:.4f}"
     return (
         f"[{tag}] n={m['n']} (known={m['n_known']}, unknown={m['n_unknown']})\n"
         f"    balanced acc (model axis): open-set {m['balanced_open_set_acc']:.4f}"
         f"  |  detection {m['balanced_detection_acc']:.4f}\n"
+        f"    macro-F1                 : open-set (K+1) {m['macro_f1_open']:.4f}"
+        f"  |  closed-set (K, gate-free) {m['macro_f1_closed']:.4f}\n"
+        f"    gate (threshold-free)    : EER {eer}  |  AUROC {auroc}\n"
         f"    open-set acc (micro)     : {m['open_set_acc']:.4f}\n"
         f"    detection acc (micro)    : {m['detection_acc']:.4f}"
         f"  (known recall {m['known_recall']:.3f}, unknown recall {m['unknown_recall']:.3f})\n"
