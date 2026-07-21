@@ -145,36 +145,6 @@ def detection_pointwise(s: np.ndarray, known: np.ndarray) -> Dict[str, float]:
             "threshold": 0.5}
 
 
-def unknown_model_f1(s: np.ndarray, known: np.ndarray,
-                     model_names: np.ndarray) -> Dict[str, float]:
-    """Per-unknown-model F1, macro-averaged across the individual TTS models.
-
-    ``detection_pointwise``'s ``f1_unknown`` pools every unknown clip into one
-    class, so a handful of easy (high-volume) unknown models can flatter it.
-    This instead scores each unseen model against the pooled knowns
-    separately -- model ``m``'s clips are the positive class, all known clips
-    are the negative class, and every *other* unknown model's clips are
-    excluded from that pairing -- then macro-averages F1 across models so
-    each one counts equally regardless of its clip count.
-    """
-    accepted = s >= 0.5
-    rejected = ~accepted
-    unk = ~known
-    models = sorted(set(model_names[unk]) - {""})
-    per_model: Dict[str, Dict[str, float]] = {}
-    f1s: List[float] = []
-    for m in models:
-        pos = unk & (model_names == m)
-        mask = known | pos
-        prf = _prf(rejected[mask], pos[mask])
-        per_model[m] = prf
-        if prf["f1"] == prf["f1"]:
-            f1s.append(prf["f1"])
-    return {"macro_f1_unknown": float(np.mean(f1s)) if f1s else float("nan"),
-            "n_unknown_models": len(models),
-            "per_model_f1": {m: v["f1"] for m, v in per_model.items()}}
-
-
 def balanced_open_set_acc(pred: np.ndarray, labels: np.ndarray, s: np.ndarray,
                           known: np.ndarray, n_classes: int = N_CLASSES) -> Dict[str, float]:
     """Open-set accuracy weighing knowns and unknowns 50/50.
@@ -268,7 +238,6 @@ def run(
     is_overlap = np.isin(model_names, list(OVERLAP_MODELS))
     keep = known | ~is_overlap          # keep all knowns + non-overlap unknowns
     results["detection_41"] = detection(s[keep], known[keep])
-    results["unknown_model_f1"] = unknown_model_f1(s, known, model_names)
 
     # Joint + closed-set
     correct = pred == labels
@@ -331,9 +300,6 @@ def _save_and_print(art: Path, results: Dict) -> None:
     logger.info("@s>=0.5    macro-F1 %.4f (known %.4f, unk %.4f) | "
                 "acc %.4f | bal-acc %.4f", dp["macro_f1"], dp["f1_known"],
                 dp["f1_unknown"], dp["accuracy"], dp["balanced_accuracy"])
-    umf1 = results["unknown_model_f1"]
-    logger.info("Per-model  macro-F1(unknown) %.4f over %d unseen models",
-                umf1["macro_f1_unknown"], umf1["n_unknown_models"])
     logger.info("Open-set   bal-OSA %.4f (known-macro %.4f, unk-recall %.4f)",
                 osa["balanced_open_set_acc"], osa["known_macro_recall"],
                 osa["unknown_recall"])
